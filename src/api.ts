@@ -1,0 +1,622 @@
+import {
+  Judge,
+  JudgeCaseResult,
+  Language,
+  Paged,
+  ProblemDetail,
+  SubmissionDetail,
+  SubmissionRecord,
+  TrainingInfo,
+  UserInfo,
+} from './types';
+
+export class OjError extends Error {
+  constructor(
+    message: string,
+    public httpStatus?: number,
+    public bizStatus?: number,
+    /** True when the failure is caused by the network/server/proxy, not by the account. */
+    public isConnection = false,
+  ) {
+    super(message);
+    this.name = 'OjError';
+  }
+}
+
+const DEFAULT_TIMEOUT_MS = 10000;
+
+function causeChain(e: any): any[] {
+  const list: any[] = [];
+  let cur = e;
+  for (let i = 0; cur && i < 5; i++) {
+    list.push(cur);
+    cur = cur.cause;
+  }
+  return list;
+}
+
+function errorCode(e: any): string {
+  for (const item of causeChain(e)) {
+    const code = item?.code || item?.errno;
+    if (code) return String(code);
+  }
+  return '';
+}
+
+function connectionMessage(e: any, baseUrl: string, timeoutMs: number): string {
+  if (e?.name === 'AbortError' || errorCode(e) === 'ABORT_ERR') {
+    return `连接失败：连接服务器超时（${Math.round(timeoutMs / 1000)} 秒）：${baseUrl}`;
+  }
+  const code = errorCode(e).toUpperCase();
+  const raw = causeChain(e)
+    .map((x) => String(x?.message || ''))
+    .filter(Boolean)
+    .join(' | ');
+  let reason = '';
+  if (/proxy|tunnel/i.test(raw)) reason = '代理连接失败（代理返回异常）';
+  else if (/bad port|invalid port/i.test(raw)) reason = '服务器地址或端口无效';
+  else if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') reason = '域名解析失败（DNS 错误）';
+  else if (code === 'ECONNREFUSED') reason = '服务器拒绝连接';
+  else if (code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT') reason = '连接超时';
+  else if (code === 'ECONNRESET' || code === 'UND_ERR_SOCKET') reason = '连接被重置';
+  else if (code === 'EHOSTUNREACH' || code === 'ENETUNREACH') reason = '网络不可达';
+  else if (code === 'EPROTO' || code === 'ERR_SSL_WRONG_VERSION_NUMBER') reason = 'TLS 连接失败';
+  else if (/CERT|SELF_SIGNED|UNABLE_TO_VERIFY/i.test(code + raw)) reason = 'HTTPS 证书校验失败';
+  else reason = raw || '网络错误';
+  return `连接失败：无法访问 ${baseUrl}（${reason}）。请检查网络、代理或服务器状态`;
+}
+
+function connectionError(e: any, baseUrl: string, timeoutMs: number): OjError {
+  return new OjError(connectionMessage(e, baseUrl, timeoutMs), undefined, undefined, true);
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export interface OjApiOptions {
+  baseUrl: string;
+  getToken?: () => string | undefined | Promise<string | undefined>;
+  onUnauthorized?: () => Promise<string | undefined>;
+  timeoutMs?: number;
+}
+
+interface RequestOptions {
+  method?: string;
+  query?: Record<string, any>;
+  body?: any;
+  auth?: boolean;
+  timeoutMs?: number;
+  raw?: boolean;
+}
+
+/**
+ * Pure HTTP client for the HOJ (NUAA OJ) API. Contains no `vscode` imports so it
+ * can be smoke-tested in plain Node.
+ */
+export class OjApi {
+  private baseUrl: string;
+  private getToken?: () => string | undefined | Promise<string | undefined>;
+  private onUnauthorized?: () => Promise<string | undefined>;
+  private timeoutMs: number;
+
+  constructor(opts: OjApiOptions) {
+    this.baseUrl = opts.baseUrl.replace(/\/+$/, '');
+    this.getToken = opts.getToken;
+    this.onUnauthorized = opts.onUnauthorized;
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  }
+
+  setBaseUrl(baseUrl: string) {
+    this.baseUrl = baseUrl.replace(/\/+$/, '');
+  }
+
+  private buildUrl(path: string, query?: Record<string, any>): string {
+    const url = new URL(this.baseUrl + (path.startsWith('/') ? path : '/' + path));
+    if (query) {
+      for (const [k, v] of Object.entries(query)) {
+        if (v === undefined || v === null || v === '') continue;
+        if (Array.isArray(v)) {
+          v.forEach((item) => url.searchParams.append(k, String(item)));
+        } else {
+          url.searchParams.append(k, String(v));
+        }
+      }
+    }
+    return url.toString();
+  }
+
+  /** Low-level request returning the `data` field of the HOJ envelope. */
+  async request<T = any>(path: string, opts: RequestOptions = {}): Promise<T> {
+    const { method = 'GET', query, body, auth = true } = opts;
+    const url = this.buildUrl(path, query);
+    const doFetch = async (token?: string): Promise<Response> => {
+      const headers: Record<string, string> = {
+        'Url-Type': 'general',
+        Accept: 'application/json, text/plain, */*',
+      };
+      if (body !== undefined) headers['Content-Type'] = 'application/json';
+      if (auth && token) headers['Authorization'] = token;
+      return fetchWithTimeout(
+        url,
+        {
+          method,
+          headers,
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+        },
+        opts.timeoutMs ?? this.timeoutMs,
+      );
+    };
+
+    let token: string | undefined;
+    if (auth && this.getToken) {
+      token = await this.getToken();
+    }
+
+    let res: Response;
+    try {
+      res = await doFetch(token);
+      if (res.status === 401 && auth && this.onUnauthorized) {
+        const fresh = await this.onUnauthorized();
+        if (fresh) {
+          res = await doFetch(fresh);
+        }
+      }
+    } catch (e: any) {
+      if (e instanceof OjError) throw e;
+      throw connectionError(e, this.baseUrl, opts.timeoutMs ?? this.timeoutMs);
+    }
+
+    const text = await res.text();
+    let json: any;
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      if (!res.ok) {
+        throw new OjError(`服务器返回异常响应（HTTP ${res.status}）。`, res.status, undefined, res.status >= 500);
+      }
+      // Some endpoints may return plain text; return as-is when allowed.
+      return text as unknown as T;
+    }
+
+    if (!res.ok) {
+      const msg = json?.msg || json?.message || `服务器异常（HTTP ${res.status}）`;
+      throw new OjError(msg, res.status, json?.status, res.status >= 500);
+    }
+    if (json && typeof json.status === 'number' && json.status !== 200) {
+      throw new OjError(json.msg || `业务错误（status=${json.status}）`, res.status, json.status, json.status >= 500);
+    }
+    return (json?.data ?? json) as T;
+  }
+
+  // ---- Authentication -------------------------------------------------------
+  async login(username: string, password: string): Promise<{ token: string; user: UserInfo }> {
+    const url = this.buildUrl('/api/login');
+    let res: Response;
+    try {
+      res = await fetchWithTimeout(
+        url,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Url-Type': 'general', Accept: 'application/json' },
+          body: JSON.stringify({ username, password }),
+        },
+        this.timeoutMs,
+      );
+    } catch (e: any) {
+      throw connectionError(e, this.baseUrl, this.timeoutMs);
+    }
+    const text = await res.text();
+    let json: any = {};
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      /* ignore */
+    }
+    if (!res.ok || (json.status && json.status !== 200)) {
+      const serverError = res.status >= 500 || Number(json?.status) >= 500;
+      throw new OjError(
+        json?.msg || (serverError ? `服务器异常（HTTP ${res.status}）` : `登录失败（HTTP ${res.status}）`),
+        res.status,
+        json?.status,
+        serverError,
+      );
+    }
+    const token = res.headers.get('authorization') || res.headers.get('Authorization') || '';
+    if (!token) {
+      throw new OjError('登录成功但服务器未返回 Authorization 令牌。');
+    }
+    return { token, user: json.data as UserInfo };
+  }
+
+  async getUserAuthInfo(): Promise<{ roles: string[] } & UserInfo> {
+    return this.request('/api/get-user-auth-info');
+  }
+
+  // ---- Problems -------------------------------------------------------------
+  async getProblemDetail(problemId: string, gid?: number): Promise<ProblemDetail> {
+    return this.request('/api/get-problem-detail', { query: { problemId, gid } });
+  }
+
+  async getTrainingProblemDetail(displayId: string, tid: number): Promise<ProblemDetail> {
+    return this.request('/api/get-training-problem-details', { query: { displayId, tid } });
+  }
+
+  async getProblemList(params: {
+    currentPage?: number;
+    limit?: number;
+    keyword?: string;
+    difficulty?: number;
+    oj?: string;
+    tagId?: number[];
+  } = {}): Promise<Paged<any>> {
+    return this.request('/api/get-problem-list', { query: params });
+  }
+
+  /**
+   * Per-problem status of the CURRENT user for a list of internal problem ids.
+   * Returns { [pid]: { status, score } }; status 0 = AC, -10 = never submitted, else last verdict.
+   */
+  async getUserProblemStatus(
+    pidList: number[],
+    isContestProblemList = false,
+    cid?: number,
+    gid?: number,
+    containsEnd = false,
+  ): Promise<Record<string, any>> {
+    return this.request('/api/get-user-problem-status', {
+      method: 'POST',
+      body: { pidList, isContestProblemList, cid: cid ?? null, gid: gid ?? null, containsEnd },
+    });
+  }
+
+  async getTrainingList(params: { currentPage?: number; limit?: number; keyword?: string } = {}): Promise<Paged<TrainingInfo>> {
+    return this.request('/api/get-training-list', { query: params });
+  }
+
+  async getTrainingDetail(tid: number): Promise<TrainingInfo> {
+    return this.request('/api/get-training-detail', { query: { tid } });
+  }
+
+  async getTrainingProblemList(tid: number): Promise<any[]> {
+    return this.request('/api/get-training-problem-list', { query: { tid } });
+  }
+
+  /**
+   * Recommendation service "learning map": the student's course, knowledge points (chapters),
+   * and per-knowledge-point homework / practice / recommended problems plus progress.
+   */
+  async getLearningMap(userId: string | number): Promise<any> {
+    return this.request(`/recommendation-api/learning-map/${encodeURIComponent(String(userId))}`);
+  }
+
+  async getLanguages(all = false): Promise<Language[]> {
+    return this.request('/api/languages', { query: { all }, auth: false });
+  }
+
+  // ---- Judge / submission ---------------------------------------------------
+  async submit(params: {
+    pid: string;
+    language: string;
+    code: string;
+    cid?: number;
+    tid?: number;
+    gid?: number;
+    isRemote?: boolean;
+  }): Promise<Judge> {
+    return this.request('/api/submit-problem-judge', {
+      method: 'POST',
+      body: {
+        pid: params.pid,
+        language: params.language,
+        code: params.code,
+        cid: params.cid ?? 0,
+        tid: params.tid ?? null,
+        gid: params.gid ?? null,
+        isRemote: params.isRemote ?? false,
+      },
+    });
+  }
+
+  async getSubmissionDetail(submitId: number): Promise<SubmissionDetail> {
+    return this.request('/api/get-submission-detail', { query: { submitId } });
+  }
+
+  /** The current user's most recent accepted (AC) code for a problem. Empty code means never AC. */
+  async getUserLastAcceptedCode(
+    pid: number,
+    cid?: number,
+  ): Promise<{ submitId?: number; code: string; language?: string }> {
+    return this.request('/api/get-last-ac-code', { query: { pid, cid } });
+  }
+
+  async getAllCaseResult(submitId: number): Promise<JudgeCaseResult> {
+    return this.request('/api/get-all-case-result', { query: { submitId } });
+  }
+
+  /** Submit an online (cloud) test-judge with a custom input; returns a testJudgeKey. */
+  async submitTestJudge(params: {
+    pid: number;
+    language: string;
+    code: string;
+    userInput: string;
+    expectedOutput?: string;
+    type?: 'public' | 'contest' | 'group';
+    mode?: string;
+    isRemoteJudge?: boolean;
+  }): Promise<string> {
+    return this.request('/api/submit-problem-test-judge', {
+      method: 'POST',
+      body: {
+        pid: params.pid,
+        language: params.language,
+        code: params.code,
+        type: params.type || 'public',
+        userInput: params.userInput,
+        expectedOutput: params.expectedOutput ?? '',
+        mode: params.mode ?? '',
+        isRemoteJudge: params.isRemoteJudge ?? false,
+      },
+    });
+  }
+
+  /** Get the result of an online test-judge. status 5 = pending; otherwise done (key is then removed). */
+  async getTestJudgeResult(testJudgeKey: string): Promise<any> {
+    return this.request('/api/get-test-judge-result', { query: { testJudgeKey } });
+  }
+
+  async checkSubmissionsStatus(submitIds: number[], cid?: number): Promise<Record<string, any>> {
+    return this.request('/api/check-submissions-status', {
+      method: 'POST',
+      body: { submitIds, cid: cid ?? 0 },
+    });
+  }
+
+  async getSubmissionList(params: {
+    limit?: number;
+    currentPage?: number;
+    onlyMine?: boolean;
+    problemID?: string;
+    completeProblemID?: boolean;
+    status?: number;
+    username?: string;
+  } = {}): Promise<Paged<SubmissionRecord>> {
+    return this.request('/api/get-submission-list', { query: params });
+  }
+
+  // ---- NUAA learning assistant (recommendation service) ---------------------
+  async assistantContext(username: string, problemId: string, submitId?: string | number): Promise<any> {
+    return this.request(`/recommendation-api/student/${encodeURIComponent(username)}/assistant/context`, {
+      query: { problem_id: problemId, submit_id: submitId },
+    });
+  }
+
+  async assistantSessions(username: string): Promise<any[]> {
+    return this.request(`/recommendation-api/student/${encodeURIComponent(username)}/assistant/sessions`);
+  }
+
+  async assistantSession(username: string, sessionId: string): Promise<any[]> {
+    return this.request(`/recommendation-api/student/${encodeURIComponent(username)}/assistant/session/${encodeURIComponent(sessionId)}`);
+  }
+
+  /**
+   * Ask the assistant, consuming the SSE stream. Calls `onEvent` for each JSON
+   * payload (`{t}` text chunk, `{meta}`, `{done:true}`, ...).
+   */
+  async assistantAskStream(
+    username: string,
+    body: any,
+    onEvent: (ev: any) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const url = this.buildUrl(`/recommendation-api/student/${encodeURIComponent(username)}/assistant/ask`);
+    const token = this.getToken ? await this.getToken() : undefined;
+    const headers: Record<string, string> = {
+      'Url-Type': 'general',
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    };
+    if (token) headers['Authorization'] = token;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+    } catch (e: any) {
+      throw new OjError(`无法连接助教服务：${e?.message ?? e}`);
+    }
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      throw new OjError(`助教服务返回 HTTP ${res.status} ${t.slice(0, 200)}`, res.status);
+    }
+    const parseBlock = (block: string) => {
+      for (const line of block.split(/\r?\n/)) {
+        const m = /^data:\s?(.*)$/.exec(line);
+        if (!m) continue;
+        const payload = m[1].trim();
+        if (!payload || payload === '[DONE]') continue;
+        try {
+          onEvent(JSON.parse(payload));
+        } catch {
+          onEvent({ t: payload });
+        }
+      }
+    };
+    const reader = res.body?.getReader();
+    if (!reader) {
+      parseBlock(await res.text());
+      return;
+    }
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        parseBlock(buf.slice(0, idx));
+        buf = buf.slice(idx + 2);
+      }
+    }
+    if (buf.trim()) parseBlock(buf);
+  }
+
+  // ---- Ability profile & streaming advice -----------------------------------
+  async studentProfile(username: string): Promise<any> {
+    return this.request(`/recommendation-api/student_profile/${encodeURIComponent(username)}`);
+  }
+
+  private async streamGet(path: string, onEvent: (ev: any) => void, signal?: AbortSignal): Promise<void> {
+    const url = this.buildUrl(path);
+    const token = this.getToken ? await this.getToken() : undefined;
+    const headers: Record<string, string> = { 'Url-Type': 'general', Accept: 'text/event-stream' };
+    if (token) headers['Authorization'] = token;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: 'GET', headers, signal });
+    } catch (e: any) {
+      throw new OjError(`无法连接服务：${e?.message ?? e}`);
+    }
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      throw new OjError(`服务返回 HTTP ${res.status} ${t.slice(0, 200)}`, res.status);
+    }
+    const parseBlock = (block: string) => {
+      for (const line of block.split(/\r?\n/)) {
+        const m = /^data:\s?(.*)$/.exec(line);
+        if (!m) continue;
+        const payload = m[1].trim();
+        if (!payload || payload === '[DONE]') continue;
+        try {
+          onEvent(JSON.parse(payload));
+        } catch {
+          onEvent({ t: payload });
+        }
+      }
+    };
+    const reader = res.body?.getReader();
+    if (!reader) {
+      parseBlock(await res.text());
+      return;
+    }
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        parseBlock(buf.slice(0, idx));
+        buf = buf.slice(idx + 2);
+      }
+    }
+    if (buf.trim()) parseBlock(buf);
+  }
+
+  async adviceKnowledgeStream(username: string, onEvent: (ev: any) => void, signal?: AbortSignal): Promise<void> {
+    return this.streamGet(`/recommendation-api/student/${encodeURIComponent(username)}/advice/knowledge/stream`, onEvent, signal);
+  }
+
+  async adviceMethodStream(username: string, onEvent: (ev: any) => void, signal?: AbortSignal): Promise<void> {
+    return this.streamGet(`/recommendation-api/student/${encodeURIComponent(username)}/advice/method/stream`, onEvent, signal);
+  }
+
+  // ---- Settings: profile / account -----------------------------------------
+  async changeUserInfo(body: any): Promise<any> {
+    return this.request('/api/change-userInfo', { method: 'POST', body });
+  }
+
+  async getUserRank(params: { limit?: number; currentPage?: number; type: number; searchUser?: string }): Promise<Paged<any>> {
+    return this.request('/api/get-rank-list', { query: params });
+  }
+
+  async getUserHomeInfo(uid: string, username: string): Promise<any> {
+    return this.request('/api/get-user-home-info', { query: { uid, username } });
+  }
+
+  async getUserCalendarHeatmap(uid: string, username: string): Promise<any> {
+    return this.request('/api/get-user-calendar-heatmap', { query: { uid, username } });
+  }
+
+  async getRecent7ACRank(): Promise<any[]> {
+    return this.request('/api/get-recent-seven-ac-rank');
+  }
+
+  async getLastWeekSubmissionStatistics(forceRefresh = false): Promise<any> {
+    return this.request('/api/get-last-week-submission-statistics', { query: { forceRefresh } });
+  }
+
+  async getRecentUpdatedProblemList(): Promise<any[]> {
+    return this.request('/api/get-recent-updated-problem');
+  }
+
+  async getSysMsgList(params: { limit?: number; currentPage?: number }): Promise<Paged<any>> {
+    return this.request('/api/msg/sys', { query: params });
+  }
+
+  async getUnreadMsgCount(): Promise<any> {
+    return this.request('/api/msg/unread');
+  }
+
+  async getSelfTests(params: { page?: number; limit?: number; status?: number; scope?: string }): Promise<Paged<any>> {
+    return this.request('/recommendation-api/self-tests', { query: params });
+  }
+
+  async getLearningOverview(username: string): Promise<any> {
+    return this.request(`/recommendation-api/overview/${encodeURIComponent(username)}`);
+  }
+
+  async getCourseCurrentTopic(): Promise<any> {
+    return this.request('/recommendation-api/course/current-topic');
+  }
+
+  async getKnowledgeCapability(username: string, kpId: string): Promise<any> {
+    return this.request(`/recommendation-api/student_profile/${encodeURIComponent(username)}/knowledge/${encodeURIComponent(kpId)}`);
+  }
+
+  async getWeeklyAnalysis(week?: string): Promise<any> {
+    const q = week ? `?week=${encodeURIComponent(week)}` : '';
+    return this.request(`/recommendation-api/weekly-analysis/student${q}`);
+  }
+  async changePassword(oldPassword: string, newPassword: string): Promise<any> {
+    return this.request('/api/change-password', { method: 'POST', body: { oldPassword, newPassword } });
+  }
+  async getChangeEmailCode(email: string): Promise<any> {
+    return this.request('/api/get-change-email-code', { query: { email } });
+  }
+  async changeEmail(password: string, newEmail: string, code: string): Promise<any> {
+    return this.request('/api/change-email', { method: 'POST', body: { password, newEmail, code } });
+  }
+  async uploadAvatar(buf: Uint8Array | ArrayBuffer, mime: string, filename: string): Promise<any> {
+    const url = this.buildUrl('/api/file/upload-avatar');
+    const token = this.getToken ? await this.getToken() : undefined;
+    const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    const form = new FormData();
+    form.append('image', new Blob([bytes as unknown as BlobPart], { type: mime || 'image/png' }), filename || 'avatar.png');
+    const headers: Record<string, string> = { 'Url-Type': 'general' };
+    if (token) headers['Authorization'] = token;
+    let res: Response;
+    try {
+      res = await fetchWithTimeout(url, { method: 'POST', headers, body: form as any }, this.timeoutMs);
+    } catch (e: any) {
+      throw connectionError(e, this.baseUrl, this.timeoutMs);
+    }
+    const text = await res.text();
+    let json: any;
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      throw new OjError('头像上传返回非 JSON。', res.status);
+    }
+    if (!res.ok || (typeof json.status === 'number' && json.status !== 200)) {
+      throw new OjError(json.msg || `头像上传失败（HTTP ${res.status}）`, res.status);
+    }
+    return json.data;
+  }
+}

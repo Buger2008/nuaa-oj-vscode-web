@@ -1,0 +1,226 @@
+{
+  "name": "nuaa-oj-vscode-web",
+  "displayName": "NUAA OJ Web Client",
+  "description": "NUAA OJ 的 VS Code for the Web 版本：云端测试、云端提交，代码与界面复用桌面版。",
+  "version": "0.1.8",
+  "publisher": "buger",
+  "license": "MIT",
+  "icon": "resources/nuaa-oj.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Buger2008/nuaa-oj-vscode-web"
+  },
+  "homepage": "https://github.com/Buger2008/nuaa-oj-vscode-web",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "browser": "./dist/web/extension.js",
+  "capabilities": {
+    "virtualWorkspaces": true,
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "nuaaOjContainer",
+          "title": "NUAA OJ",
+          "icon": "resources/nuaa-oj.svg"
+        }
+      ]
+    },
+    "views": {
+      "nuaaOjContainer": [
+        {
+          "type": "webview",
+          "id": "nuaaOjHome",
+          "name": "NUAA OJ"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "nuaaOj.login",
+        "title": "NUAA OJ: 登录"
+      },
+      {
+        "command": "nuaaOj.logout",
+        "title": "NUAA OJ: 退出登录"
+      },
+      {
+        "command": "nuaaOj.openProblem",
+        "title": "NUAA OJ: 打开题目"
+      },
+      {
+        "command": "nuaaOj.openFromClipboard",
+        "title": "NUAA OJ: 从剪贴板打开题目"
+      },
+      {
+        "command": "nuaaOj.testCurrent",
+        "title": "NUAA OJ: 云端测试当前代码"
+      },
+      {
+        "command": "nuaaOj.submitCurrent",
+        "title": "NUAA OJ: 提交当前代码"
+      },
+      {
+        "command": "nuaaOj.showProblem",
+        "title": "NUAA OJ: 查看题目描述"
+      },
+      {
+        "command": "nuaaOj.openInBrowser",
+        "title": "NUAA OJ: 在浏览器中打开"
+      },
+      {
+        "command": "nuaaOj.refreshProblems",
+        "title": "NUAA OJ: 刷新题目列表"
+      },
+      {
+        "command": "nuaaOj.openAssistantGeneral",
+        "title": "NUAA OJ: 打开 AI 助手"
+      },
+      {
+        "command": "nuaaOj.openSettings",
+        "title": "NUAA OJ: 打开设置"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "nuaaOj.openAssistantGeneral",
+          "when": "config.nuaaOj.features.recommendationApi"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "nuaaOj.testCurrent",
+          "when": "nuaaOj.hasProblem",
+          "group": "navigation@1"
+        },
+        {
+          "command": "nuaaOj.submitCurrent",
+          "when": "nuaaOj.hasProblem",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "NUAA OJ Web",
+      "properties": {
+        "nuaaOj.baseUrl": {
+          "type": "string",
+          "default": "https://oj.nuaa.edu.cn",
+          "description": "OJ 站点地址"
+        },
+        "nuaaOj.username": {
+          "type": "string",
+          "default": "",
+          "description": "上次登录的用户名（仅作显示与预填）"
+        },
+        "nuaaOj.defaultLanguage": {
+          "type": "string",
+          "default": "C",
+          "description": "默认编程语言"
+        },
+        "nuaaOj.problemFolder": {
+          "type": "string",
+          "default": "nuaa-oj",
+          "description": "在虚拟工作区中保存题目的目录"
+        },
+        "nuaaOj.pollIntervalMs": {
+          "type": "number",
+          "default": 1000,
+          "description": "云端评测轮询间隔（毫秒）"
+        },
+        "nuaaOj.pollTimeoutMs": {
+          "type": "number",
+          "default": 60000,
+          "description": "云端评测轮询超时（毫秒）"
+        },
+        "nuaaOj.cloudTest.intervalMs": {
+          "type": "number",
+          "default": 1500,
+          "description": "在线自测轮询间隔（毫秒）"
+        },
+        "nuaaOj.submit.confirm": {
+          "type": "boolean",
+          "default": true,
+          "description": "提交前显示确认对话框"
+        },
+        "nuaaOj.openStatementOnOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "打开题目时同时打开题面面板"
+        },
+        "nuaaOj.autoCreateFile": {
+          "type": "boolean",
+          "default": true,
+          "description": "打开题目后自动创建并打开代码文件"
+        },
+        "nuaaOj.recommendation.userId": {
+          "type": "string",
+          "default": "",
+          "description": "推荐/学习数据使用的用户 ID（留空使用登录用户名）"
+        },
+        "nuaaOj.features.recommendationApi": {
+          "type": "boolean",
+          "default": false,
+          "description": "服务端为 /recommendation-api 配置 CORS 后开启；关闭时隐藏作业、学径、AI 助手、能力画像和在线自测等依赖该接口的功能"
+        },
+        "nuaaOj.tabs.home": {
+          "type": "boolean",
+          "default": true,
+          "description": "显示首页标签"
+        },
+        "nuaaOj.tabs.problems": {
+          "type": "boolean",
+          "default": true,
+          "description": "显示自由练习标签"
+        },
+        "nuaaOj.tabs.trainings": {
+          "type": "boolean",
+          "default": true,
+          "description": "显示课内实验标签"
+        },
+        "nuaaOj.tabs.homework": {
+          "type": "boolean",
+          "default": true,
+          "description": "显示作业标签"
+        },
+        "nuaaOj.tabs.status": {
+          "type": "boolean",
+          "default": true,
+          "description": "显示状态标签"
+        },
+        "nuaaOj.tabs.rank": {
+          "type": "boolean",
+          "default": true,
+          "description": "显示排名标签"
+        },
+        "nuaaOj.tabs.my": {
+          "type": "boolean",
+          "default": true,
+          "description": "显示我的标签"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc --noEmit",
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "vscode:prepublish": "npm run build"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.4.5"
+  }
+}

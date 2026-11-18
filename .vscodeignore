@@ -1,0 +1,9 @@
+.vscode/**
+.vscode-test-web/**
+src/**
+node_modules/**
+out/**
+*.vsix
+esbuild.mjs
+tsconfig.json
+.gitignore
