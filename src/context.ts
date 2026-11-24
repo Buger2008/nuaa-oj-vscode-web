@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { ProblemDetail } from './types';
 import { Sample, parseSamples } from './samples';
 
-export type ProblemKind = 'problem' | 'training';
+export type ProblemKind = 'problem' | 'training' | 'contest';
 
 export interface ProblemContext {
   version: 1;
@@ -10,6 +10,7 @@ export interface ProblemContext {
   displayId: string;
   pid: number;
   tid?: number;
+  cid?: number;
   gid?: number;
   title: string;
   timeLimit: number;
@@ -123,18 +124,24 @@ export function buildContext(
   baseUrl: string,
   tid?: number,
   gid?: number,
+  cid?: number,
+  displayId?: string,
 ): ProblemContext {
   const p = detail.problem;
+  const did = displayId || String(p.problemId);
   const url =
     kind === 'training'
-      ? `${baseUrl}/training/${tid}/problem/${p.problemId}`
-      : `${baseUrl}/problem/${p.problemId}`;
+      ? `${baseUrl}/training/${tid}/problem/${did}`
+      : kind === 'contest'
+        ? `${baseUrl}/contest/${cid}/problem/${did}`
+        : `${baseUrl}/problem/${did}`;
   return {
     version: 1,
     kind,
-    displayId: String(p.problemId),
+    displayId: did,
     pid: p.id,
     tid,
+    cid,
     gid: gid ?? p.gid ?? undefined,
     title: p.title,
     timeLimit: p.timeLimit,
@@ -195,6 +202,7 @@ export function submissionLanguage(ctx: ProblemContext, filePath: string): strin
 export function problemFolderName(ctx: ProblemContext): string {
   // Use the problem number/ID only. Titles are often Chinese and non-ASCII paths can
   // break toolchain paths; the same rule is kept on Web for stable folder names.
+  if (ctx.kind === 'contest' && ctx.cid) return sanitizeName(`contest-${ctx.cid}-${ctx.displayId}`) || 'problem';
   return sanitizeName(ctx.displayId) || 'problem';
 }
 
