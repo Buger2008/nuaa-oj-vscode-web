@@ -2,7 +2,7 @@
   "name": "nuaa-oj-vscode-web",
   "displayName": "NUAA OJ Web Client",
   "description": "NUAA OJ 的 VS Code for the Web 版本：云端测试、云端提交，代码与界面复用桌面版。",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "publisher": "buger",
   "license": "MIT",
   "icon": "resources/nuaa-oj.png",
